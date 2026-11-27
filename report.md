@@ -85,47 +85,42 @@ payload = b"\xbb\x87\x1a\x40\x00" + b"\x68\x1f\x1c\x40\x00" + b"\x6a\x04" + b"\x
 
 ### 6. ROP (10 pts 测试 + 10 pts 报告)
 
-- `dark-calc-nx` 非 PIE（gadget 地址固定），但栈 NX 且地址随机，不能像第 5 题那样执行栈上 shellcode。改为劫持 `input` 的返回地址，用 `.text` 里的 gadget 拼出 `grade_eval(4)`。
+- `dark-calc-nx` 非 PIE（gadget 地址固定），但栈 NX 且地址随机；不能像第 5 题那样执行栈上 shellcode，改为覆盖 `input` 的返回地址，用 `.text` 里的 gadget 拼出 `grade_eval(4)`。
+- `expression` 在 `rbp-0x10`，偏移 0x10 是保存的 `rbp`，0x18 是返回地址，0x20 起是链；`input` 的 `leave; ret` 后 `rsp` 指向 0x20，之后每个 gadget 的 `ret` 依次弹下一格。
+- gadget 在 `0x4019d0–0x401ae3`：`0x401a33` 是 `pop rdi; ret`（藏在 `pop r15; ret` 的 `41 5f` 里），`0x401a40` 是 `ret`；`grade_eval` 为 `0x401978`，`exit@plt` 为 `0x4016e0`。
+- 链为 `pop rdi; 4; ret; grade_eval; pop rdi; 0; ret; exit@plt`。`input` 的 `rbp` 16 字节对齐，`ret` 后 `rsp % 16 == 0`，所以在 `grade_eval` 和 `exit` 前各插一个 `ret` 对齐。
 
-- `expression` 在 `rbp-0x10`，payload 偏移 0x10 覆盖保存的 `rbp`，0x18 覆盖返回地址，0x20 起是链的 8 字节槽。`input` 的 `leave; ret` 在 `gets`/`strcpy` 后执行：`ret` 取出 `rbp+8` 处的第一个地址，并把 `rsp` 指向 `rbp+0x10`；之后每个 gadget 的 `ret` 依次弹下一格。链只依赖 `rsp`，所以栈的 ASLR 不影响它。
-
-- gadget 在 `0x4019d0–0x401ae3`。x86 指令变长，`objdump -s` 只能看字节，要用 `objdump -d`，并注意从指令中间开始的未对齐 gadget。`__libc_csu_init` 结尾的 `41 5f c3` 中，从 `0x401a33` 看是 `5f c3`，即 `pop rdi; ret`；`0x401a40` 是 `f3 c3`（`repz ret`），可当单独的 `ret`。`grade_eval` 入口 `0x401978`，`exit@plt` 是 `0x4016e0`。
-
-- `grade_eval` 只在 `edi == 4` 时打印，所以先用 `pop rdi; ret` 把 4 放进 `rdi`，再跳到 `grade_eval`；它结尾的 `leave; ret` 回到下一格。然后用 `pop rdi; ret` 把 0 放进 `rdi`，跳到 `exit@plt`。
-
-| 偏移 | 值 | 作用 |
-|---|---|---|
-| 0x00 | `b"A"*16` | 填满 `expression` |
-| 0x10 | `b"B"*8` | 保存的 `rbp` |
-| 0x18 | `0x401a33` | `pop rdi; ret` |
-| 0x20 | `4` | `rdi = 4` |
-| 0x28 | `0x401a40` | `ret`，对齐 |
-| 0x30 | `0x401978` | `grade_eval(4)` |
-| 0x38 | `0x401a33` | `pop rdi; ret` |
-| 0x40 | `0` | `rdi = 0` |
-| 0x48 | `0x401a40` | `ret`，对齐 |
-| 0x50 | `0x4016e0` | `exit(0)` |
-
-- `input` 的 `rbp` 是 16 字节对齐的，`ret` 后 `rsp = rbp+0x10`，第一个 gadget 入口 `rsp % 16 == 0`；ABI 要求函数入口为 8。`grade_eval` 里的 `printf` 在部分 glibc 上会因不对齐崩溃，所以在 `grade_eval` 和 `exit` 前各插一个 `ret`（`0x401a40`）。GDB 确认两者入口 `rsp % 16 == 8`，且 `edi` 分别为 4 和 0。
-
-构造如下：
+那么构造如下：
 ```python
 p64 = lambda x: x.to_bytes(8, "little")
-payload = (
-    b"A" * 16 + b"B" * 8
-    + p64(0x401a33) + p64(4) + p64(0x401a40)   # rdi=4，对齐
-    + p64(0x401978)                            # grade_eval(4)
-    + p64(0x401a33) + p64(0) + p64(0x401a40)   # rdi=0，对齐
-    + p64(0x4016e0)                            # exit(0)
-)
+payload = b"A" * 16 + b"B" * 8 + p64(0x401a33) + p64(4) + p64(0x401a40) + p64(0x401978) + p64(0x401a33) + p64(0) + p64(0x401a40) + p64(0x4016e0)
 ```
 
-输出：
+结果如下：
 ![6](assets/6.png)
+
+`Hope A will be your grade!`，程序 exit 0（88 字节）。链中地址含 `0x00`，`strcpy` 只复制前 27 字节到 31 字节的 `command_buf`，不会溢出；`eval` 不会执行。
 
 ### 7. Canary (10 pts 测试 + 10 pts 报告)
 
+- `dark-log` 的 canary 在 `rbp-8`（`0x4016ea` 写入，`0x4017df` 检查），`pad[8]` 只是结构体填充、不检查；直接溢出到返回地址会跨过 `rbp-8`，触发 `__stack_chk_fail`（exit 134）。
+- 绕过：`gets` 写到偏移 256 可以改 `len`，而 canary 在偏移 280；`memcpy(f.logMsg + f.len, f.expression, 128)` 的目标是 `rbp-0xa0 + len`，取 `len = 0xa8` 时正好是 `rbp+8`（返回地址），128 字节从 `expression[0..127]` 覆盖，不碰 canary。payload 共 260 字节：128 链 + 128 填充 + 4 字节 `len`。
+- 链从 `expression[0]` 开始：`pop rdi; 4; ret; grade_eval`；`pop rdi` 为 `0x4018a3`，`ret` 为 `0x4018b0`，`grade_eval` 为 `0x401677`。
+- 普通做法：`grade_eval` 后接 0，打印后 SIGSEGV，exit 139。`dark-log` 没有 `exit@plt` 或 `syscall`，且 `memcpy` 还覆盖了 `main` 的 canary（`input rbp+0x18`），不能 `ret` 回 `main`；测试只查 stdout，139 可通过。
+- exit 0 补充：返回地址换成 `_start`（`0x401590`），下一格放 0 作 `argc`；`_start` 重新走 `__libc_start_main`，`main` 的 `input` 读到 EOF，打印 `Log saved.` 后 exit 0。
+- 防止这种绕过：把 `len` 这类控制变量移到 `expression` 的低地址一侧（先声明 `int len` 再声明数组，即数组在高地址、标量在低地址）；这样 `gets` 向高地址溢出改不到 `len`，`len` 保持 0，`memcpy` 的目标固定在 `logMsg`，不会越过 canary 写到返回地址。
 
+那么构造如下（exit 0 版本；把 `p64(0x401590)+p64(0)` 换成 `p64(0)` 就是普通做法，exit 139）：
+```python
+p64 = lambda x: x.to_bytes(8, "little")
+chain = (p64(0x4018a3) + p64(4) + p64(0x4018b0) + p64(0x401677) + p64(0x401590) + p64(0)).ljust(128, b"\x00")
+payload = chain + b"A" * 128 + (0xA8).to_bytes(4, "little")
+```
+
+结果如下：
+![7](assets/7.png)
+
+`Hope A will be your grade!`，随后 `Log saved.`，exit 0；普通做法只打印到目标字符串，exit 139。
 
 ### 使用的工具
 
@@ -133,4 +128,5 @@ payload = (
   - 任务 1：帮助确认答案的出处。
   - 任务 5：最初仅用于查询 `call` 指令的语法；段错误的定位和修改由 AI 辅助完成。我在没有 AI 帮助时独立完成的最好成绩是 payload 能正确输出 `Hope A will be your grade!`，但程序在打印后触发段错误（见 `assets/5-1.png`）。AI 指出 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 覆盖了栈上 shellcode 末尾的 `ret`，并建议改用 `push 返回地址; jmp rbx` 让程序正常退出（修改后的输出见第 5 节）。
   - 任务 6：ROP 的整体思路、gadget 地址（`pop rdi; ret`、`ret`）和链布局由 AI 提示，`payload_rop.py` 与本节报告由 AI 辅助完成并在本机验证。
+  - 任务 7：在核对 canary 机制的基础上，`len` 绕过的具体排布、`_start` 的 exit-0 收尾由 AI 辅助整理，`payload_canary.py` 与本节报告由 AI 辅助完成并在本机验证。
 - 除上述说明外，1–4 题的答案、payload 的构造与地址计算均由我独立完成。（git 仓库中 AI 辅助完成部分会标明 AI Assisted，不完美的历史记录可以在 git 的 commit 记录中找到）
