@@ -53,7 +53,17 @@ payload = b"./malware" + b"\x00" * 7 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\
 
 ### 4. 用 GDB 检查 main 函数的机器码 (5 pts 报告)
 
+1. 
+- `main` 函数的前三行汇编为 `push rbp; mov rbp,rsp; mov eax,0x0`；
+- 执行 `x /9xb 0x401ac3` 结果整理为 `55 48 89 e5 b8 00 00 00 00`；
+- 对应的机器码： `push rbp` 为 `55`，`mov rbp,rsp` 为 `48 89 e5`，`mov eax,0x0` 为 `b8 00 00 00 00`；
 
+2. 排列方式：
+```
+[0x401ac3, 0x401ac4) : push rbp
+[0x401ac4, 0x401ac7) : mov  rbp,rsp
+[0x401ac7, 0x401acc) : mov  eax,0x0
+```
 
 ### 5. 栈空间执行 (25 pts 测试 + 5 pts 报告)
 
