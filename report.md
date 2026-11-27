@@ -67,19 +67,21 @@ payload = b"./malware" + b"\x00" * 7 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\
 
 ### 5. 栈空间执行 (25 pts 测试 + 5 pts 报告)
 
-- 类似 3(Task1)，对 `0x0000721000800fe8` 改为 `expression` 的地址；不能改为 `command_buf` 是因为 `strcpy` 的时候会忽略第一个 `0x00` 及之后的部分；不能直接跳到 `grade_eval`，而是要先 `mov edi, 4`
-- `command_buf` 或 `expression` 都有 16B 的余量，够用来 `mov edi, 4; mov ebx, 0x401a87; call rbx; ret`
-- 将 `0x0000721000800fe0` 的内容照抄，否则会段错误；
+- 类似 3(Task1)，把 `0x0000721000800fe8` 处的返回地址改为 `expression` 的地址 `0x0000721000800fd0`；不能改为 `command_buf` 是因为 `strcpy` 遇到第一个 `0x00` 就停止，后面的 shellcode 不会被复制；不能直接跳到 `grade_eval`，需要先把参数寄存器 `edi` 置为 4。
+- `expression` 缓冲区一共只有 16 字节，正好用来放 shellcode；它后面的 `0x0000721000800fe0` 存放 `rbp`，`0x0000721000800fe8` 存放返回地址。
+- 我最初独立完成的版本是 `mov edi,4; mov ebx,0x401a87; call rbx; ret`：能正确输出目标字符串，但 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 会把参数 4 写到 `0x0000721000800fdc`，覆盖 shellcode 末尾的 `ret`（在 `0xfdc`）；`grade_eval` 返回后从 `0xfdc` 执行 `04 00 00 00`（`add al,0; add [rax],al`），此时 `rax=0`，于是在 `0xfde` 触发段错误（见 `assets/5.png`）。崩溃发生在打印之后，不影响输出，但程序不能正常退出。
+- 修改：不用 `call`，而是先把 `grade_eval` 返回后要去的 `0x401c1f`（`__wrap_main+0x11` 的 `mov rsp,r12; pop r12; ret`）压栈，再 `jmp rbx` 进入 `grade_eval`；这样 `grade_eval` 的 `leave/ret` 直接回到 `0x401c1f`，恢复 libc 栈，程序正常退出。
 
-那么构造如下：
+那么构造如下（15 字节指令 + 1 字节填充 + 保存的 `rbp` + 返回地址）：
 ```python
-payload = b"\xbf\x04\x00\x00\x00" + b"\xbb\x87\x1a\x40\x00" + b"\xff\xd3" + b"\xc3" + b"\x00" * 3 + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\xd0\x0f\x80\x00\x10\x72\x00\x00"
+payload = b"\xbb\x87\x1a\x40\x00" + b"\x68\x1f\x1c\x40\x00" + b"\x6a\x04" + b"\x5f" + b"\xff\xe3" + b"\x00" + b"\xf0\x0f\x80\x00\x10\x72\x00\x00" + b"\xd0\x0f\x80\x00\x10\x72\x00\x00"
 ```
 
-结果如下：
-![5](assets/5.png)
+修改前的输出（输出后段错误）：
+![5-1](assets/5-1.png)
 
-能正确输出 `Hope A will be your grade! `，但是段错误，不完美，但是我自己只能做到这个程度了。
+修改后的输出（退出码 0）：
+![5-2](assets/5-2.png)
 
 ### 6. ROP (10 pts 测试 + 10 pts 报告)
 
@@ -91,4 +93,7 @@ payload = b"\xbf\x04\x00\x00\x00" + b"\xbb\x87\x1a\x40\x00" + b"\xff\xd3" + b"\x
 
 ### 使用的工具
 
-- Deepseek-V4.1-Flash-1017: 对于问题 1 帮我确定答案的出处；对于问题 4 仅查询 call 语法相关
+- DeepSeek-V4.1-Flash-1017（通过 dsh 使用）：
+  - 任务 1：帮助确认答案的出处。
+  - 任务 5：最初仅用于查询 `call` 指令的语法；段错误的定位和修改由 AI 辅助完成。我在没有 AI 帮助时独立完成的最好成绩是 payload 能正确输出 `Hope A will be your grade!`，但程序在打印后触发段错误（见 `assets/5.png`）。AI 指出 `grade_eval` 的 `mov %edi,-0x4(%rbp)` 覆盖了栈上 shellcode 末尾的 `ret`，并建议改用 `push 返回地址; jmp rbx` 让程序正常退出（修改后的输出见第 5 节）。
+- 除上述说明外，1–4 题的答案、payload 的构造与地址计算均由我独立完成。
